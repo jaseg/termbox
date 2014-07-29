@@ -156,13 +156,14 @@ struct tb_event {
 #define TB_EUNSUPPORTED_TERMINAL -1
 #define TB_EFAILED_TO_OPEN_TTY   -2
 #define TB_EPIPE_TRAP_ERROR      -3
+#define TB_ENOMEM                -4
 
 /* Initializes the termbox library. This function should be called before any
  * other functions. After successful initialization, the library must be
  * finalized using the tb_shutdown() function.
  */
 SO_IMPORT int tb_init(void);
-SO_IMPORT void tb_shutdown(void);
+SO_IMPORT int tb_shutdown(void);
 
 /* Returns the size of the internal back buffer (which is the same as
  * terminal's window size in characters). The internal buffer can be resized
@@ -174,11 +175,11 @@ SO_IMPORT int tb_height(void);
 /* Clears the internal back buffer using TB_DEFAULT color or the
  * color/attributes set by tb_set_clear_attributes() function.
  */
-SO_IMPORT void tb_clear(void);
+SO_IMPORT int tb_clear(void);
 SO_IMPORT void tb_set_clear_attributes(uint16_t fg, uint16_t bg);
 
 /* Syncronizes the internal back buffer with the terminal. */
-SO_IMPORT void tb_present(void);
+SO_IMPORT int tb_present(void);
 
 #define TB_HIDE_CURSOR -1
 
@@ -186,7 +187,7 @@ SO_IMPORT void tb_present(void);
  * TB_HIDE_CURSOR as both coordinates, then the cursor will be hidden. Cursor
  * is hidden by default.
  */
-SO_IMPORT void tb_set_cursor(int cx, int cy);
+SO_IMPORT int tb_set_cursor(int cx, int cy);
 
 /* Changes cell's parameters in the internal back buffer at the specified
  * position.

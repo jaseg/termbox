@@ -2,40 +2,33 @@ struct bytebuffer {
 	char *buf;
 	int len;
 	int cap;
+	int alloc_error;
 };
 
-static void bytebuffer_reserve(struct bytebuffer *b, int cap) {
-	if (b->cap >= cap) {
-		return;
-	}
+static int bytebuffer_reserve(struct bytebuffer *b, int cap) {
+	if (b->cap >= cap)
+		return b->alloc_error;
 
 	// prefer doubling capacity
-	if (b->cap * 2 >= cap) {
+	if (b->cap * 2 >= cap)
 		cap = b->cap * 2;
-	}
 
-	char *newbuf = malloc(cap);
-	if (b->len > 0) {
-		// copy what was there, b->len > 0 assumes b->buf != null
-		memcpy(newbuf, b->buf, b->len);
-	}
-	if (b->buf) {
-		// in case there was an allocated buffer, free it
-		free(b->buf);
+	char *newbuf = realloc(b->buf, cap);
+	if(!newbuf){
+		b->alloc_error = 1;
+		return 1;
 	}
 	b->buf = newbuf;
 	b->cap = cap;
+	return b->alloc_error;
 }
 
-static void bytebuffer_init(struct bytebuffer *b, int cap) {
+static int bytebuffer_init(struct bytebuffer *b, int cap) {
 	b->cap = 0;
 	b->len = 0;
 	b->buf = 0;
-
-	if (cap > 0) {
-		b->cap = cap;
-		b->buf = malloc(cap); // just assume malloc works always
-	}
+	b->alloc_error = 0;
+	return bytebuffer_reserve(b, cap);
 }
 
 static void bytebuffer_free(struct bytebuffer *b) {
@@ -47,19 +40,23 @@ static void bytebuffer_clear(struct bytebuffer *b) {
 	b->len = 0;
 }
 
-static void bytebuffer_append(struct bytebuffer *b, const char *data, int len) {
-	bytebuffer_reserve(b, b->len + len);
+static int bytebuffer_append(struct bytebuffer *b, const char *data, int len) {
+	if(bytebuffer_reserve(b, b->len + len))
+		return 1;
 	memcpy(b->buf + b->len, data, len);
 	b->len += len;
+	return 0;
 }
 
-static void bytebuffer_puts(struct bytebuffer *b, const char *str) {
-	bytebuffer_append(b, str, strlen(str));
+static int bytebuffer_puts(struct bytebuffer *b, const char *str) {
+	return bytebuffer_append(b, str, strlen(str));
 }
 
-static void bytebuffer_resize(struct bytebuffer *b, int len) {
-	bytebuffer_reserve(b, len);
+static int bytebuffer_resize(struct bytebuffer *b, int len) {
+	if(bytebuffer_reserve(b, len))
+		return 1;
 	b->len = len;
+	return 0;
 }
 
 static void bytebuffer_flush(struct bytebuffer *b, int fd) {

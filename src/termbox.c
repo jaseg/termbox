@@ -52,21 +52,21 @@ static int cursor_y = -1;
 static uint16_t background = TB_DEFAULT;
 static uint16_t foreground = TB_DEFAULT;
 
-static void write_cursor(int x, int y);
-static void write_sgr_fg(uint16_t fg);
-static void write_sgr_bg(uint16_t bg);
-static void write_sgr(uint16_t fg, uint16_t bg);
+static int write_cursor(int x, int y);
+static int write_sgr_fg(uint16_t fg);
+static int write_sgr_bg(uint16_t bg);
+static int write_sgr(uint16_t fg, uint16_t bg);
 
-static void cellbuf_init(struct cellbuf *buf, int width, int height);
-static void cellbuf_resize(struct cellbuf *buf, int width, int height);
+static int cellbuf_init(struct cellbuf *buf, int width, int height);
+static int cellbuf_resize(struct cellbuf *buf, int width, int height);
 static void cellbuf_clear(struct cellbuf *buf);
 static void cellbuf_free(struct cellbuf *buf);
 
-static void update_size(void);
+static int update_size(void);
 static void update_term_size(void);
-static void send_attr(uint16_t fg, uint16_t bg);
-static void send_char(int x, int y, uint32_t c);
-static void send_clear(void);
+static int send_attr(uint16_t fg, uint16_t bg);
+static int send_char(int x, int y, uint32_t c);
+static int send_clear(void);
 static void sigwinch_handler(int xxx);
 static int wait_fill_event(struct tb_event *event, struct timeval *timeout);
 
@@ -78,9 +78,8 @@ static volatile int buffer_size_change_request;
 int tb_init(void)
 {
 	inout = open("/dev/tty", O_RDWR);
-	if (inout == -1) {
+	if (inout == -1)
 		return TB_EFAILED_TO_OPEN_TTY;
-	}
 
 	if (init_term() < 0) {
 		close(inout);
@@ -119,24 +118,32 @@ int tb_init(void)
 	bytebuffer_puts(&output_buffer, funcs[T_ENTER_CA]);
 	bytebuffer_puts(&output_buffer, funcs[T_ENTER_KEYPAD]);
 	bytebuffer_puts(&output_buffer, funcs[T_HIDE_CURSOR]);
-	send_clear();
+	if (output_buffer.alloc_error || input_buffer.alloc_error)
+		return TB_ENOMEM;
+
+	if (send_clear())
+		return TB_ENOMEM;
 
 	update_term_size();
-	cellbuf_init(&back_buffer, termw, termh);
-	cellbuf_init(&front_buffer, termw, termh);
+	if (cellbuf_init(&back_buffer, termw, termh))
+		return TB_ENOMEM;
+	if (cellbuf_init(&front_buffer, termw, termh))
+		return TB_ENOMEM;
 	cellbuf_clear(&back_buffer);
 	cellbuf_clear(&front_buffer);
 
 	return 0;
 }
 
-void tb_shutdown(void)
+int tb_shutdown(void)
 {
 	bytebuffer_puts(&output_buffer, funcs[T_SHOW_CURSOR]);
 	bytebuffer_puts(&output_buffer, funcs[T_SGR0]);
 	bytebuffer_puts(&output_buffer, funcs[T_CLEAR_SCREEN]);
 	bytebuffer_puts(&output_buffer, funcs[T_EXIT_CA]);
 	bytebuffer_puts(&output_buffer, funcs[T_EXIT_KEYPAD]);
+	if (output_buffer.alloc_error)
+		return TB_ENOMEM;
 	bytebuffer_flush(&output_buffer, inout);
 	tcsetattr(inout, TCSAFLUSH, &orig_tios);
 
@@ -149,9 +156,10 @@ void tb_shutdown(void)
 	cellbuf_free(&front_buffer);
 	bytebuffer_free(&output_buffer);
 	bytebuffer_free(&input_buffer);
+	return 0;
 }
 
-void tb_present(void)
+int tb_present(void)
 {
 	int x,y;
 	struct tb_cell *back, *front;
@@ -161,7 +169,8 @@ void tb_present(void)
 	lasty = LAST_COORD_INIT;
 
 	if (buffer_size_change_request) {
-		update_size();
+		if (update_size())
+			return TB_ENOMEM;
 		buffer_size_change_request = 0;
 	}
 
@@ -171,28 +180,35 @@ void tb_present(void)
 			front = &CELL(&front_buffer, x, y);
 			if (memcmp(back, front, sizeof(struct tb_cell)) == 0)
 				continue;
-			send_attr(back->fg, back->bg);
-			send_char(x, y, back->ch);
+			if (send_attr(back->fg, back->bg) ||
+				send_char(x, y, back->ch))
+				return TB_ENOMEM;
 			memcpy(front, back, sizeof(struct tb_cell));
 		}
 	}
 	if (!IS_CURSOR_HIDDEN(cursor_x, cursor_y))
-		write_cursor(cursor_x, cursor_y);
+		if (write_cursor(cursor_x, cursor_y))
+			return TB_ENOMEM;
 	bytebuffer_flush(&output_buffer, inout);
+	return 0;
 }
 
-void tb_set_cursor(int cx, int cy)
+int tb_set_cursor(int cx, int cy)
 {
 	if (IS_CURSOR_HIDDEN(cursor_x, cursor_y) && !IS_CURSOR_HIDDEN(cx, cy))
-		bytebuffer_puts(&output_buffer, funcs[T_SHOW_CURSOR]);
+		if (bytebuffer_puts(&output_buffer, funcs[T_SHOW_CURSOR]))
+			return TB_ENOMEM;
 
 	if (!IS_CURSOR_HIDDEN(cursor_x, cursor_y) && IS_CURSOR_HIDDEN(cx, cy))
-		bytebuffer_puts(&output_buffer, funcs[T_HIDE_CURSOR]);
+		if (bytebuffer_puts(&output_buffer, funcs[T_HIDE_CURSOR]))
+			return TB_ENOMEM;
 
 	cursor_x = cx;
 	cursor_y = cy;
 	if (!IS_CURSOR_HIDDEN(cursor_x, cursor_y))
-		write_cursor(cursor_x, cursor_y);
+		if (write_cursor(cursor_x, cursor_y))
+			return TB_ENOMEM;
+	return 0;
 }
 
 void tb_put_cell(int x, int y, const struct tb_cell *cell)
@@ -251,13 +267,15 @@ int tb_height(void)
 	return termh;
 }
 
-void tb_clear(void)
+int tb_clear(void)
 {
 	if (buffer_size_change_request) {
-		update_size();
+		if (update_size())
+			return TB_ENOMEM;
 		buffer_size_change_request = 0;
 	}
 	cellbuf_clear(&back_buffer);
+	return 0;
 }
 
 int tb_select_input_mode(int mode)
@@ -300,34 +318,37 @@ static int convertnum(uint32_t num, char* buf) {
 #define WRITE_LITERAL(X) bytebuffer_append(&output_buffer, (X), sizeof(X)-1)
 #define WRITE_INT(X) bytebuffer_append(&output_buffer, buf, convertnum((X), buf))
 
-static void write_cursor(int x, int y) {
+static int write_cursor(int x, int y) {
 	char buf[32];
 	WRITE_LITERAL("\033[");
 	WRITE_INT(y+1);
 	WRITE_LITERAL(";");
 	WRITE_INT(x+1);
 	WRITE_LITERAL("H");
+	return output_buffer.alloc_error;
 }
 
 // can only be called in NORMAL output mode
-static void write_sgr_fg(uint16_t fg) {
+static int write_sgr_fg(uint16_t fg) {
 	char buf[32];
 
 	WRITE_LITERAL("\033[3");
 	WRITE_INT(fg-1);
 	WRITE_LITERAL("m");
+	return output_buffer.alloc_error;
 }
 
 // can only be called in NORMAL output mode
-static void write_sgr_bg(uint16_t bg) {
+static int write_sgr_bg(uint16_t bg) {
 	char buf[32];
 
 	WRITE_LITERAL("\033[4");
 	WRITE_INT(bg-1);
 	WRITE_LITERAL("m");
+	return output_buffer.alloc_error;
 }
 
-static void write_sgr(uint16_t fg, uint16_t bg) {
+static int write_sgr(uint16_t fg, uint16_t bg) {
 	char buf[32];
 
 	switch (outputmode) {
@@ -349,26 +370,30 @@ static void write_sgr(uint16_t fg, uint16_t bg) {
 		WRITE_INT(bg-1);
 		WRITE_LITERAL("m");
 	}
+	return output_buffer.alloc_error;
 }
 
-static void cellbuf_init(struct cellbuf *buf, int width, int height)
+static int cellbuf_init(struct cellbuf *buf, int width, int height)
 {
 	buf->cells = (struct tb_cell*)malloc(sizeof(struct tb_cell) * width * height);
-	assert(buf->cells);
+	if (!buf->cells)
+		return 1;
 	buf->width = width;
 	buf->height = height;
+	return 0;
 }
 
-static void cellbuf_resize(struct cellbuf *buf, int width, int height)
+static int cellbuf_resize(struct cellbuf *buf, int width, int height)
 {
 	if (buf->width == width && buf->height == height)
-		return;
+		return 0;
 
 	int oldw = buf->width;
 	int oldh = buf->height;
 	struct tb_cell *oldcells = buf->cells;
 
-	cellbuf_init(buf, width, height);
+	if (cellbuf_init(buf, width, height))
+		return 1;
 	cellbuf_clear(buf);
 
 	int minw = (width < oldw) ? width : oldw;
@@ -382,6 +407,7 @@ static void cellbuf_resize(struct cellbuf *buf, int width, int height)
 	}
 
 	free(oldcells);
+	return 0;
 }
 
 static void cellbuf_clear(struct cellbuf *buf)
@@ -423,7 +449,7 @@ static void update_term_size(void)
 	termh = sz.ws_row;
 }
 
-static void send_attr(uint16_t fg, uint16_t bg)
+static int send_attr(uint16_t fg, uint16_t bg)
 {
 #define LAST_ATTR_INIT 0xFFFF
 	static uint16_t lastfg = LAST_ATTR_INIT, lastbg = LAST_ATTR_INIT;
@@ -440,15 +466,23 @@ static void send_attr(uint16_t fg, uint16_t bg)
 			break;
 
 		case TB_OUTPUT_216:
-			fgcol = fg & 0xFF; if(fgcol > 215) fgcol = 7;
-			bgcol = bg & 0xFF; if(bgcol > 215) bgcol = 0;
+			fgcol = fg & 0xFF;
+			if (fgcol > 215)
+				fgcol = 7;
+			bgcol = bg & 0xFF;
+			if (bgcol > 215)
+				bgcol = 0;
 			fgcol += 0x10;
 			bgcol += 0x10;
 			break;
 
 		case TB_OUTPUT_GRAYSCALE:
-			fgcol = fg & 0xFF; if(fgcol > 23) fg = 23;
-			bgcol = bg & 0xFF; if(bgcol > 23) bg = 0;
+			fgcol = fg & 0xFF;
+			if (fgcol > 23)
+				fg = 23;
+			bgcol = bg & 0xFF;
+			if (bgcol > 23)
+				bg = 0;
 			fgcol += 0xe8;
 			bgcol += 0xe8;
 			break;
@@ -490,26 +524,32 @@ static void send_attr(uint16_t fg, uint16_t bg)
 		lastfg = fg;
 		lastbg = bg;
 	}
+	return output_buffer.alloc_error;
 }
 
-static void send_char(int x, int y, uint32_t c)
+static int send_char(int x, int y, uint32_t c)
 {
 	char buf[7];
 	int bw = tb_utf8_unicode_to_char(buf, c);
 	buf[bw] = '\0';
 	if (x-1 != lastx || y != lasty)
-		write_cursor(x, y);
+		if (write_cursor(x, y))
+			return 1;
 	lastx = x; lasty = y;
-	if(!c) buf[0] = ' '; // replace 0 with whitespace
-	bytebuffer_puts(&output_buffer, buf);
+	if (!c)
+		buf[0] = ' '; // replace 0 with whitespace
+	return bytebuffer_puts(&output_buffer, buf);
 }
 
-static void send_clear(void)
+static int send_clear(void)
 {
-	send_attr(foreground, background);
-	bytebuffer_puts(&output_buffer, funcs[T_CLEAR_SCREEN]);
+	if (send_attr(foreground, background))
+		return 1;
+	if (bytebuffer_puts(&output_buffer, funcs[T_CLEAR_SCREEN]))
+		return 1;
 	if (!IS_CURSOR_HIDDEN(cursor_x, cursor_y))
-		write_cursor(cursor_x, cursor_y);
+		if (write_cursor(cursor_x, cursor_y))
+			return 1;
 	bytebuffer_flush(&output_buffer, inout);
 
 	/* we need to invalidate cursor position too and these two vars are
@@ -519,6 +559,7 @@ static void send_clear(void)
 	 * cursor moved */
 	lastx = LAST_COORD_INIT;
 	lasty = LAST_COORD_INIT;
+	return 0;
 }
 
 static void sigwinch_handler(int xxx)
@@ -528,13 +569,15 @@ static void sigwinch_handler(int xxx)
 	write(winch_fds[1], &zzz, sizeof(int));
 }
 
-static void update_size(void)
+static int update_size(void)
 {
 	update_term_size();
-	cellbuf_resize(&back_buffer, termw, termh);
-	cellbuf_resize(&front_buffer, termw, termh);
+	if (cellbuf_resize(&back_buffer, termw, termh))
+		return 1;
+	if (cellbuf_resize(&front_buffer, termw, termh))
+		return 1;
 	cellbuf_clear(&front_buffer);
-	send_clear();
+	return send_clear();
 }
 
 static int wait_fill_event(struct tb_event *event, struct timeval *timeout)
@@ -552,7 +595,8 @@ static int wait_fill_event(struct tb_event *event, struct timeval *timeout)
 	// it looks like input buffer is incomplete, let's try the short path,
 	// but first make sure there is enough space
 	int prevlen = input_buffer.len;
-	bytebuffer_resize(&input_buffer, prevlen + ENOUGH_DATA_FOR_PARSING);
+	if (bytebuffer_resize(&input_buffer, prevlen + ENOUGH_DATA_FOR_PARSING))
+		return TB_ENOMEM;
 	ssize_t r = read(inout,	input_buffer.buf + prevlen,
 		ENOUGH_DATA_FOR_PARSING);
 	if (r < 0) {
@@ -560,11 +604,13 @@ static int wait_fill_event(struct tb_event *event, struct timeval *timeout)
 		assert(errno != EAGAIN && errno != EWOULDBLOCK);
 		return -1;
 	} else if (r > 0) {
-		bytebuffer_resize(&input_buffer, prevlen + r);
+		if (bytebuffer_resize(&input_buffer, prevlen + r))
+			return TB_ENOMEM;
 		if (extract_event(event, &input_buffer, inputmode))
 			return TB_EVENT_KEY;
 	} else {
-		bytebuffer_resize(&input_buffer, prevlen);
+		if (bytebuffer_resize(&input_buffer, prevlen))
+			return TB_ENOMEM;
 	}
 
 	// r == 0, or not enough data, let's go to select
@@ -580,8 +626,9 @@ static int wait_fill_event(struct tb_event *event, struct timeval *timeout)
 		if (FD_ISSET(inout, &events)) {
 			event->type = TB_EVENT_KEY;
 			prevlen = input_buffer.len;
-			bytebuffer_resize(&input_buffer,
-				prevlen + ENOUGH_DATA_FOR_PARSING);
+			if (bytebuffer_resize(&input_buffer,
+					prevlen + ENOUGH_DATA_FOR_PARSING))
+				return TB_ENOMEM;
 			r = read(inout, input_buffer.buf + prevlen,
 				ENOUGH_DATA_FOR_PARSING);
 			if (r < 0) {
@@ -589,7 +636,8 @@ static int wait_fill_event(struct tb_event *event, struct timeval *timeout)
 				assert(errno != EAGAIN && errno != EWOULDBLOCK);
 				return -1;
 			}
-			bytebuffer_resize(&input_buffer, prevlen + r);
+			if (bytebuffer_resize(&input_buffer, prevlen + r))
+				return TB_ENOMEM;
 			if (r == 0)
 				continue;
 			if (extract_event(event, &input_buffer, inputmode))
